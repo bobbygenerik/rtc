@@ -9,6 +9,11 @@ pub enum ProtectionProfile {
     Aes256CmHmacSha1_32 = 0x0004,
     AeadAes128Gcm = 0x0007,
     AeadAes256Gcm = 0x0008,
+    #[allow(non_camel_case_types)]
+    Aes128CmHmacSha2mki_80 = 0x0009,
+    #[allow(non_camel_case_types)]
+    Aes128CmHmacSha2mki_32 = 0x00010,
+    Aes128CmMkiNoAuth = 0x0011,
 }
 
 impl ProtectionProfile {
@@ -16,6 +21,9 @@ impl ProtectionProfile {
         match *self {
             ProtectionProfile::Aes128CmHmacSha1_32
             | ProtectionProfile::Aes128CmHmacSha1_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
+            | ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmMkiNoAuth
             | ProtectionProfile::AeadAes128Gcm => 16,
             ProtectionProfile::Aes256CmHmacSha1_32 | ProtectionProfile::Aes256CmHmacSha1_80 => 32,
             ProtectionProfile::AeadAes256Gcm => 32,
@@ -26,6 +34,9 @@ impl ProtectionProfile {
         match *self {
             ProtectionProfile::Aes128CmHmacSha1_32
             | ProtectionProfile::Aes128CmHmacSha1_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
+            | ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmMkiNoAuth
             | ProtectionProfile::Aes256CmHmacSha1_32
             | ProtectionProfile::Aes256CmHmacSha1_80 => 14,
             ProtectionProfile::AeadAes128Gcm | ProtectionProfile::AeadAes256Gcm => 12,
@@ -34,9 +45,15 @@ impl ProtectionProfile {
 
     pub fn rtp_auth_tag_len(&self) -> usize {
         match *self {
-            ProtectionProfile::Aes128CmHmacSha1_80 | ProtectionProfile::Aes256CmHmacSha1_80 => 10,
-            ProtectionProfile::Aes128CmHmacSha1_32 | ProtectionProfile::Aes256CmHmacSha1_32 => 4,
-            ProtectionProfile::AeadAes128Gcm | ProtectionProfile::AeadAes256Gcm => 0,
+            ProtectionProfile::Aes128CmHmacSha1_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes256CmHmacSha1_80 => 10,
+            ProtectionProfile::Aes128CmHmacSha1_32
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
+            | ProtectionProfile::Aes256CmHmacSha1_32 => 4,
+            ProtectionProfile::Aes128CmMkiNoAuth
+            | ProtectionProfile::AeadAes128Gcm
+            | ProtectionProfile::AeadAes256Gcm => 0,
         }
     }
 
@@ -44,9 +61,13 @@ impl ProtectionProfile {
         match *self {
             ProtectionProfile::Aes128CmHmacSha1_80
             | ProtectionProfile::Aes128CmHmacSha1_32
+            | ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
             | ProtectionProfile::Aes256CmHmacSha1_80
             | ProtectionProfile::Aes256CmHmacSha1_32 => 10,
-            ProtectionProfile::AeadAes128Gcm | ProtectionProfile::AeadAes256Gcm => 0,
+            ProtectionProfile::Aes128CmMkiNoAuth
+            | ProtectionProfile::AeadAes128Gcm
+            | ProtectionProfile::AeadAes256Gcm => 0,
         }
     }
 
@@ -54,6 +75,9 @@ impl ProtectionProfile {
         match *self {
             ProtectionProfile::Aes128CmHmacSha1_80
             | ProtectionProfile::Aes128CmHmacSha1_32
+            | ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
+            | ProtectionProfile::Aes128CmMkiNoAuth
             | ProtectionProfile::Aes256CmHmacSha1_80
             | ProtectionProfile::Aes256CmHmacSha1_32 => 0,
             ProtectionProfile::AeadAes128Gcm | ProtectionProfile::AeadAes256Gcm => 16,
@@ -64,9 +88,21 @@ impl ProtectionProfile {
         match *self {
             ProtectionProfile::Aes128CmHmacSha1_80
             | ProtectionProfile::Aes128CmHmacSha1_32
+            | ProtectionProfile::Aes128CmMkiNoAuth
             | ProtectionProfile::Aes256CmHmacSha1_80
             | ProtectionProfile::Aes256CmHmacSha1_32 => 20,
+            ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32 => 32,
             ProtectionProfile::AeadAes128Gcm | ProtectionProfile::AeadAes256Gcm => 0,
+        }
+    }
+
+    pub fn mki_len(&self) -> usize {
+        match *self {
+            ProtectionProfile::Aes128CmHmacSha2mki_80
+            | ProtectionProfile::Aes128CmHmacSha2mki_32
+            | ProtectionProfile::Aes128CmMkiNoAuth => 2,
+            _ => 0,
         }
     }
 }

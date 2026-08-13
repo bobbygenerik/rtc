@@ -17,8 +17,16 @@ impl Context {
             return Err(Error::ErrTooShortRtp);
         }
 
+        let advertised_roc = self
+            .cipher
+            .get_rtp_rollover_counter(encrypted, header.sequence_number);
         let state = self.get_srtp_ssrc_state(header.ssrc);
-        let (roc, diff, _) = state.next_rollover_count(header.sequence_number);
+        let (roc, diff) = if let Some(roc) = advertised_roc {
+            (roc, 0)
+        } else {
+            let (roc, diff, _) = state.next_rollover_count(header.sequence_number);
+            (roc, diff)
+        };
         if let Some(replay_detector) = &mut state.replay_detector
             && !replay_detector.check(header.sequence_number as u64)
         {
@@ -34,7 +42,11 @@ impl Context {
             if let Some(replay_detector) = &mut state.replay_detector {
                 replay_detector.accept();
             }
-            state.update_rollover_count(header.sequence_number, diff);
+            if advertised_roc.is_some() {
+                state.set_rollover_count(header.sequence_number, roc);
+            } else {
+                state.update_rollover_count(header.sequence_number, diff);
+            }
         }
 
         Ok(dst)

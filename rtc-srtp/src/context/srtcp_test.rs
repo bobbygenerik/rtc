@@ -129,6 +129,56 @@ fn test_rtcp_lifecycle() -> Result<()> {
 }
 
 #[test]
+fn test_rtcp_sha2_mki_lifecycle() -> Result<()> {
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha2mki_80,
+        ProtectionProfile::Aes128CmHmacSha2mki_32,
+    ] {
+        let mut encrypt_context = Context::new(
+            &RTCP_TEST_MASTER_KEY,
+            &RTCP_TEST_MASTER_SALT,
+            profile,
+            None,
+            None,
+        )?;
+        let mut decrypt_context = Context::new(
+            &RTCP_TEST_MASTER_KEY,
+            &RTCP_TEST_MASTER_SALT,
+            profile,
+            None,
+            None,
+        )?;
+
+        let decrypted = RTCP_TEST_CASES[0].decrypted.clone();
+        let auth_tag_len = profile.rtcp_auth_tag_len();
+        let mki_len = profile.mki_len();
+        let encrypted = encrypt_context.encrypt_rtcp(&decrypted)?;
+
+        assert_eq!(
+            encrypted.len(),
+            decrypted.len() + SRTCP_INDEX_SIZE + auth_tag_len + mki_len
+        );
+        assert_eq!(
+            &encrypted[encrypted.len() - auth_tag_len - mki_len..encrypted.len() - auth_tag_len],
+            &[0; 2]
+        );
+        assert_eq!(decrypt_context.decrypt_rtcp(&encrypted)?, decrypted);
+
+        let mut with_changed_mki = encrypted.clone();
+        let mki_offset = with_changed_mki.len() - auth_tag_len - mki_len;
+        with_changed_mki[mki_offset..mki_offset + mki_len].copy_from_slice(&[0xab, 0xcd]);
+        assert_eq!(decrypt_context.decrypt_rtcp(&with_changed_mki)?, decrypted);
+
+        let mut with_changed_auth = encrypted.clone();
+        let auth_offset = with_changed_auth.len() - auth_tag_len;
+        with_changed_auth[auth_offset] ^= 0xff;
+        assert!(decrypt_context.decrypt_rtcp(&with_changed_auth).is_err());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_rtcp_invalid_auth_tag() -> Result<()> {
     let auth_tag_len = ProtectionProfile::Aes128CmHmacSha1_80.rtcp_auth_tag_len();
 

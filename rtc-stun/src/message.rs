@@ -507,6 +507,8 @@ pub const METHOD_CONNECT: Method = Method(0x000a);
 pub const METHOD_CONNECTION_BIND: Method = Method(0x000b);
 pub const METHOD_CONNECTION_ATTEMPT: Method = Method(0x000c);
 
+pub const METHOD_APPLE_ERROR: Method = Method(0x203);
+
 impl fmt::Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let unknown = format!("0x{:x}", self.0);

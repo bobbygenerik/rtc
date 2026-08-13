@@ -53,7 +53,7 @@ where
         self.profile.aead_auth_tag_len()
     }
 
-    fn encrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut> {
+    fn encrypt_rtp(&self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut> {
         // Grow the given buffer to fit the output.
         let header_len = header.marshal_size();
         let mut writer = BytesMut::with_capacity(payload.len() + self.aead_auth_tag_len());
@@ -76,7 +76,7 @@ where
     }
 
     fn decrypt_rtp(
-        &mut self,
+        &self,
         ciphertext: &[u8],
         header: &rtp::Header,
         roc: u32,
@@ -103,7 +103,7 @@ where
     }
 
     fn encrypt_rtcp(
-        &mut self,
+        &self,
         decrypted: &[u8],
         srtcp_index: usize,
         ssrc: u32,
@@ -128,7 +128,7 @@ where
     }
 
     fn decrypt_rtcp(
-        &mut self,
+        &self,
         encrypted: &[u8],
         srtcp_index: usize,
         ssrc: u32,
@@ -308,7 +308,7 @@ mod tests {
         let master_key = vec![0u8; profile.key_len()];
         let master_salt = vec![0u8; 12];
 
-        let mut cipher =
+        let cipher =
             CipherAeadAesGcm::<Aes128>::new(profile, &master_key, &master_salt).unwrap();
 
         let header = rtp::Header {
@@ -329,7 +329,7 @@ mod tests {
         let master_key = vec![0u8; profile.key_len()];
         let master_salt = vec![0u8; 12];
 
-        let mut cipher =
+        let cipher =
             CipherAeadAesGcm::<Aes256>::new(profile, &master_key, &master_salt).unwrap();
 
         let header = rtp::Header {

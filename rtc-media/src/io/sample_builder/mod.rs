@@ -376,6 +376,35 @@ impl<T: Depacketizer> SampleBuilder<T> {
         result
     }
 
+    /// Emits one complete pending sample without waiting for a packet from the next timestamp.
+    /// The second return value reports whether flushing encountered incomplete non-padding media.
+    pub fn flush(&mut self) -> (Option<Sample>, bool) {
+        let build_result = self.build_sample(true);
+        let incomplete = match &build_result {
+            Ok(_) | Err(BuildError::NoActiveSegment) => false,
+            Err(BuildError::InvalidPartition(_)) => self.dropped_packets > self.padding_packets,
+            Err(BuildError::NothingToConsume) => !self.active.range(&self.buffer).all(|packet| {
+                packet.is_some_and(|packet| {
+                    self.last_sample_timestamp == Some(packet.header.timestamp)
+                        && packet.payload.is_empty()
+                })
+            }),
+            Err(_) => true,
+        } || self.dropped_packets > self.padding_packets;
+
+        while self.filled.has_data() && self.filled.head != self.active.head {
+            self.release_packet(self.filled.head);
+            self.filled.head = self.filled.head.wrapping_add(1);
+        }
+
+        if self.prepared.empty() {
+            return (None, incomplete);
+        }
+        let result = self.prepared_samples[self.prepared.head as usize].take();
+        self.prepared.head = self.prepared.head.wrapping_add(1);
+        (result, incomplete)
+    }
+
     /// Compiles pushed RTP packets into media samples and then
     /// returns the next valid sample with its associated RTP timestamp (or `None` if
     /// no sample is compiled).

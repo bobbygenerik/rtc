@@ -6,13 +6,10 @@ mod srtcp_test;
 mod srtp_test;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use aes::Aes128;
-use aes::Aes256;
 use shared::replay_detector::*;
 
-use crate::cipher::cipher_aead_aes_gcm::*;
-use crate::cipher::cipher_aes_cm_hmac_sha1::*;
 use crate::cipher::*;
 use crate::option::*;
 use crate::protection_profile::*;
@@ -43,6 +40,11 @@ pub(crate) struct SrtcpSsrcState {
 }
 
 impl SrtpSsrcState {
+    fn set_rollover_count(&mut self, sequence_number: u16, roc: u32) {
+        self.index = ((roc as u64) << 16) | sequence_number as u64;
+        self.rollover_has_processed = true;
+    }
+
     pub fn next_rollover_count(&self, sequence_number: u16) -> (u32, i32, bool) {
         let local_roc = (self.index >> 16) as u32;
         let local_seq = self.index as u16;
@@ -93,7 +95,7 @@ impl SrtpSsrcState {
 /// Context can only be used for one-way operations
 /// it must either used ONLY for encryption or ONLY for decryption
 pub struct Context {
-    cipher: Box<dyn Cipher>,
+    cipher: Arc<dyn Cipher>,
 
     srtp_ssrc_states: HashMap<u32, SrtpSsrcState>,
     srtcp_ssrc_states: HashMap<u32, SrtcpSsrcState>,
@@ -111,35 +113,20 @@ impl Context {
         srtp_ctx_opt: Option<ContextOption>,
         srtcp_ctx_opt: Option<ContextOption>,
     ) -> Result<Context> {
-        let key_len = profile.key_len();
-        let salt_len = profile.salt_len();
+        let cipher = new_cipher(master_key, master_salt, profile)?;
+        Ok(Self::new_with_cipher(
+            cipher,
+            srtp_ctx_opt,
+            srtcp_ctx_opt,
+        ))
+    }
 
-        if master_key.len() != key_len {
-            return Err(Error::SrtpMasterKeyLength(key_len, master_key.len()));
-        } else if master_salt.len() != salt_len {
-            return Err(Error::SrtpSaltLength(salt_len, master_salt.len()));
-        }
-
-        let cipher: Box<dyn Cipher> = match profile {
-            ProtectionProfile::Aes128CmHmacSha1_32
-            | ProtectionProfile::Aes128CmHmacSha1_80
-            | ProtectionProfile::Aes256CmHmacSha1_80
-            | ProtectionProfile::Aes256CmHmacSha1_32 => {
-                Box::new(CipherAesCmHmacSha1::new(profile, master_key, master_salt)?)
-            }
-
-            ProtectionProfile::AeadAes128Gcm => Box::new(CipherAeadAesGcm::<Aes128>::new(
-                profile,
-                master_key,
-                master_salt,
-            )?),
-
-            ProtectionProfile::AeadAes256Gcm => Box::new(CipherAeadAesGcm::<Aes256>::new(
-                profile,
-                master_key,
-                master_salt,
-            )?),
-        };
+    /// Create a new SRTP context using pre-built immutable cipher material.
+    pub fn new_with_cipher(
+        cipher: Arc<dyn Cipher>,
+        srtp_ctx_opt: Option<ContextOption>,
+        srtcp_ctx_opt: Option<ContextOption>,
+    ) -> Context {
 
         let srtp_ctx_opt = if let Some(ctx_opt) = srtp_ctx_opt {
             ctx_opt
@@ -153,13 +140,19 @@ impl Context {
             srtcp_no_replay_protection()
         };
 
-        Ok(Context {
+        Context {
             cipher,
             srtp_ssrc_states: HashMap::new(),
             srtcp_ssrc_states: HashMap::new(),
             new_srtp_replay_detector: srtp_ctx_opt,
             new_srtcp_replay_detector: srtcp_ctx_opt,
-        })
+        }
+    }
+
+    /// Replace only the cipher material, preserving all per-SSRC RTP and RTCP
+    /// state. The previous cipher is returned for reuse or delayed packets.
+    pub fn replace_cipher(&mut self, cipher: Arc<dyn Cipher>) -> Arc<dyn Cipher> {
+        std::mem::replace(&mut self.cipher, cipher)
     }
 
     fn get_srtp_ssrc_state(&mut self, ssrc: u32) -> &mut SrtpSsrcState {

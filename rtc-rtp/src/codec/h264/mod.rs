@@ -262,7 +262,8 @@ impl Depacketizer for H264Packet {
                     return Err(Error::ErrShortPacket);
                 }
 
-                if self.fua_buffer.is_none() {
+                let b1 = packet[1];
+                if b1 & FU_START_BITMASK != 0 || self.fua_buffer.is_none() {
                     self.fua_buffer = Some(BytesMut::new());
                 }
 
@@ -270,7 +271,6 @@ impl Depacketizer for H264Packet {
                     fua_buffer.put(&*packet.slice(FUA_HEADER_SIZE..));
                 }
 
-                let b1 = packet[1];
                 if b1 & FU_END_BITMASK != 0 {
                     let nalu_ref_idc = b0 & NALU_REF_IDC_BITMASK;
                     let fragmented_nalu_type = b1 & NALU_TYPE_BITMASK;

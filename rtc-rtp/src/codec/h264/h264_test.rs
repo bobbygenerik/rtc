@@ -192,6 +192,57 @@ fn test_h264_packet_unmarshal() -> Result<()> {
 }
 
 #[test]
+fn test_h264_packet_passes_apple_image_description() -> Result<()> {
+    let mut pkt = H264Packet::default();
+    let payload = pkt.depacketize(&Bytes::from_static(&[0x92, 0xe6, 0xc0, 0xa3, 0x00]))?;
+    assert_eq!(
+        payload,
+        Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x92, 0xe6, 0xc0, 0xa3, 0x00])
+    );
+
+    let stap_a = Bytes::from_static(&[
+        STAPA_NALU_TYPE,
+        0x00,
+        0x05,
+        0x92,
+        0xe6,
+        0xc0,
+        0xa3,
+        0x00,
+        0x00,
+        0x03,
+        0x61,
+        0x01,
+        0x02,
+    ]);
+    let payload = pkt.depacketize(&stap_a)?;
+    assert_eq!(
+        payload,
+        Bytes::from_static(&[
+            0x00, 0x00, 0x00, 0x01, 0x92, 0xe6, 0xc0, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x61, 0x01, 0x02,
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_h264_packet_new_fu_start_discards_incomplete_fu() -> Result<()> {
+    let mut pkt = H264Packet::default();
+
+    assert!(pkt.depacketize(&Bytes::from_static(&[0x7c, 0x81, 0xaa]))?.is_empty());
+    assert!(pkt.depacketize(&Bytes::from_static(&[0x7c, 0x81, 0xbb]))?.is_empty());
+    let payload = pkt.depacketize(&Bytes::from_static(&[0x7c, 0x41, 0xcc]))?;
+
+    assert_eq!(
+        payload,
+        Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x61, 0xbb, 0xcc])
+    );
+    Ok(())
+}
+
+#[test]
 fn test_h264_partition_head_checker_is_partition_head() -> Result<()> {
     let h264 = H264Packet::default();
     let empty_nalu = Bytes::from_static(&[]);

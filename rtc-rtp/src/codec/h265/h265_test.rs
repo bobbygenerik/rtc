@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn test_h265_packet_passes_apple_image_description() -> Result<()> {
+    let mut pkt = H265Packet::default();
+    let payload = pkt.depacketize(&Bytes::from_static(&[0x92, 0xe6, 0xc0, 0xa3, 0x00]))?;
+    assert_eq!(
+        payload,
+        Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x92, 0xe6, 0xc0, 0xa3, 0x00])
+    );
+
+    let payload = pkt.depacketize(&Bytes::from_static(&[
+        0x00, 0x00, 0x00, 0x01, 0x92, 0xe6, 0xc0, 0xa3, 0x00,
+    ]))?;
+    assert_eq!(
+        payload,
+        Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x92, 0xe6, 0xc0, 0xa3, 0x00])
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_h265_nalu_header() -> Result<()> {
     #[derive(Default)]
     struct TestType {
@@ -884,6 +904,97 @@ fn test_h265_packet_real() -> Result<()> {
         let mut pck = H265Packet::default();
         let _ = pck.depacketize(&Bytes::from(cur))?;
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_h265_fragmentation_unit_reassembly() -> Result<()> {
+    let mut packet = H265Packet::default();
+
+    let start = Bytes::from_static(&[0x62, 0x01, 0x94, 0xaa, 0xbb]);
+    let middle = Bytes::from_static(&[0x62, 0x01, 0x14, 0xcc, 0xdd]);
+    let end = Bytes::from_static(&[0x62, 0x01, 0x54, 0xee, 0xff]);
+
+    assert_eq!(packet.depacketize(&start)?, Bytes::new());
+    assert_eq!(packet.depacketize(&middle)?, Bytes::new());
+    assert_eq!(
+        packet.depacketize(&end)?,
+        Bytes::from_static(&[
+            0x00, 0x00, 0x00, 0x01, // Annex-B start code
+            0x28, 0x01, // reconstructed type-20 IDR_N_LP NAL header
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_h265_apple_image_description_fu_reassembly() -> Result<()> {
+    let mut packet = H265Packet::default();
+
+    let start = Bytes::from_static(&[
+        0xe2, 0xe6, 0x89, // FU indicator with F=1, start, original type 9
+        0xc0, 0xa3, 0x00, 0x00, 0x00, 0xe9,
+    ]);
+    let end = Bytes::from_static(&[
+        0xe2, 0xe6, 0x49, // FU indicator with F=1, end, original type 9
+        0x68, 0x76, 0x63, 0x31,
+    ]);
+
+    assert_eq!(packet.depacketize(&start)?, Bytes::new());
+    assert_eq!(
+        packet.depacketize(&end)?,
+        Bytes::from_static(&[
+            0x00, 0x00, 0x00, 0x01, // Annex-B start code
+            0x92, 0xe6, // reconstructed Apple ImageDescription pseudo-NAL header
+            0xc0, 0xa3, 0x00, 0x00, 0x00, 0xe9, 0x68, 0x76, 0x63, 0x31,
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_h265_payloader_fragments_type_20_and_preserves_tid() -> Result<()> {
+    let mut payloader = HevcPayloader::default();
+    let payload = Bytes::from_static(&[
+        0x00, 0x00, 0x00, 0x01, // Annex-B start code
+        0x28, 0x03, // type-20 IDR_N_LP, tid=3
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ]);
+
+    let packets = payloader.payload(6, &payload)?;
+
+    assert_eq!(
+        packets,
+        vec![
+            Bytes::from_static(&[0x62, 0x03, 0x94, 0xaa, 0xbb, 0xcc]),
+            Bytes::from_static(&[0x62, 0x03, 0x54, 0xdd, 0xee, 0xff]),
+        ]
+    );
+
+    let mut depacketizer = H265Packet::default();
+    assert_eq!(depacketizer.depacketize(&packets[0])?, Bytes::new());
+    assert_eq!(
+        depacketizer.depacketize(&packets[1])?,
+        Bytes::from_static(&[
+            0x00, 0x00, 0x00, 0x01, // Annex-B start code
+            0x28, 0x03, // reconstructed type-20 IDR_N_LP NAL header
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_h265_payloader_accepts_raw_nal_without_annexb_start_code() -> Result<()> {
+    let mut payloader = HevcPayloader::default();
+    let payload = Bytes::from_static(&[0x28, 0x01, 0xaa, 0xbb]);
+
+    assert_eq!(payloader.payload(1200, &payload)?, vec![payload]);
 
     Ok(())
 }

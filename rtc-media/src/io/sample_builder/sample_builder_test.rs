@@ -1504,6 +1504,108 @@ fn test_sample_builder_push_max_zero() {
 }
 
 #[test]
+fn test_sample_builder_flushes_complete_pending_sample() {
+    let mut s = SampleBuilder::new(50, FakeDepacketizer::new(), 1);
+
+    s.push(Packet {
+        header: Header {
+            sequence_number: 10,
+            timestamp: 10,
+            marker: true,
+            ..Default::default()
+        },
+        payload: bytes!(0x01),
+        ..Default::default()
+    });
+
+    assert_eq!(s.pop(), None, "A normal pop should wait for the next timestamp.");
+    let (sample, incomplete) = s.flush();
+    let sample = sample.expect("Flush should emit the marker-complete sample.");
+    assert!(!incomplete);
+    assert_eq!(sample.data, bytes!(0x01));
+    assert_eq!(sample.packet_timestamp, 10);
+    assert_eq!(sample.duration, Duration::ZERO);
+    assert_eq!(s.flush(), (None, false), "A flushed sample should only be emitted once.");
+}
+
+#[test]
+fn test_sample_builder_flush_does_not_emit_incomplete_sample() {
+    let mut s = SampleBuilder::new(50, FakeDepacketizer::new(), 1);
+
+    s.push(Packet {
+        header: Header {
+            sequence_number: 10,
+            timestamp: 10,
+            marker: false,
+            ..Default::default()
+        },
+        payload: bytes!(0x01),
+        ..Default::default()
+    });
+
+    assert_eq!(s.flush(), (None, true), "Flush must report an incomplete partition.");
+}
+
+#[test]
+fn test_sample_builder_flush_does_not_report_consumed_fragments_as_incomplete() {
+    let mut s = SampleBuilder::new(50, FakeDepacketizer::new(), 1);
+
+    s.push(Packet {
+        header: Header {
+            sequence_number: 10,
+            timestamp: 10,
+            ..Default::default()
+        },
+        payload: bytes!(0x01),
+        ..Default::default()
+    });
+    s.push(Packet {
+        header: Header {
+            sequence_number: 11,
+            timestamp: 10,
+            marker: true,
+            ..Default::default()
+        },
+        payload: bytes!(0x02),
+        ..Default::default()
+    });
+
+    let (sample, incomplete) = s.flush();
+    assert_eq!(sample.unwrap().data, bytes!(0x01, 0x02));
+    assert!(!incomplete);
+    assert_eq!(s.flush(), (None, false));
+}
+
+#[test]
+fn test_sample_builder_flush_ignores_trailing_padding() {
+    let mut s = SampleBuilder::new(50, FakeDepacketizer::new(), 1);
+
+    s.push(Packet {
+        header: Header {
+            sequence_number: 10,
+            timestamp: 10,
+            marker: true,
+            ..Default::default()
+        },
+        payload: bytes!(0x01),
+        ..Default::default()
+    });
+    assert!(!s.flush().1);
+
+    s.push(Packet {
+        header: Header {
+            sequence_number: 11,
+            timestamp: 10,
+            ..Default::default()
+        },
+        payload: bytes!(),
+        ..Default::default()
+    });
+
+    assert_eq!(s.flush(), (None, false));
+}
+
+#[test]
 fn test_pop_with_timestamp() {
     let mut s = SampleBuilder::new(0, FakeDepacketizer::new(), 1);
     assert_eq!(s.pop_with_timestamp(), None);

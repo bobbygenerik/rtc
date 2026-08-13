@@ -23,6 +23,7 @@ pub static FU_HDR_B_E: u8 = 0x40;
 pub const RTP_OUTBOUND_MTU: usize = 1200;
 pub const H265FRAGMENTATION_UNIT_HEADER_SIZE: usize = 1;
 pub const NAL_HEADER_SIZE: usize = 2;
+const APPLE_IMAGE_DESCRIPTION_MAGIC: &[u8] = &[0x92, 0xe6, 0xc0, 0xa3];
 
 #[derive(PartialEq, Hash, Debug, Copy, Clone)]
 pub enum UnitType {
@@ -76,15 +77,13 @@ impl HevcPayloader {
     }
 
     fn emit(&mut self, nalu: &Bytes, mtu: usize, payloads: &mut Vec<Bytes>) {
-        if nalu.is_empty() {
+        if nalu.len() < H265NALU_HEADER_SIZE || mtu <= H265NALU_HEADER_SIZE {
             return;
         }
         let payload_header = H265NALUHeader::new(nalu[0], nalu[1]);
         let payload_nalu_type = payload_header.nalu_type();
         let nalu_type = UnitType::for_id(payload_nalu_type).unwrap_or(UnitType::IGNORE);
-        if nalu_type == UnitType::IGNORE {
-            return;
-        } else if nalu_type == UnitType::VPS {
+        if nalu_type == UnitType::VPS {
             self.vps_nalu.replace(nalu.clone());
         } else if nalu_type == UnitType::SPS {
             self.sps_nalu.replace(nalu.clone());
@@ -98,16 +97,26 @@ impl HevcPayloader {
             let vps_len = (vps_nalu.len() as u16).to_be_bytes();
             let sps_len = (sps_nalu.len() as u16).to_be_bytes();
             let pps_len = (pps_nalu.len() as u16).to_be_bytes();
+            let include_current = nalu_type != UnitType::VPS
+                && nalu_type != UnitType::SPS
+                && nalu_type != UnitType::PPS;
+            let nalu_len = (nalu.len() as u16).to_be_bytes();
 
             // TODO DONL not impl yet
             let mut aggr_nalu = BytesMut::new();
-            aggr_nalu.extend_from_slice(&AGGR_PAYLOAD_HDR);
+            aggr_nalu.put_u16(
+                (payload_header.0 & 0x81ff) | ((H265NALU_AGGREGATION_PACKET_TYPE as u16) << 9),
+            );
             aggr_nalu.extend_from_slice(&vps_len);
             aggr_nalu.extend_from_slice(vps_nalu);
             aggr_nalu.extend_from_slice(&sps_len);
             aggr_nalu.extend_from_slice(sps_nalu);
             aggr_nalu.extend_from_slice(&pps_len);
             aggr_nalu.extend_from_slice(pps_nalu);
+            if include_current {
+                aggr_nalu.extend_from_slice(&nalu_len);
+                aggr_nalu.extend_from_slice(nalu);
+            }
             if aggr_nalu.len() <= mtu {
                 payloads.push(Bytes::from(aggr_nalu));
                 self.vps_nalu.take();
@@ -131,8 +140,9 @@ impl HevcPayloader {
             payloads.push(nalu.clone());
             return;
         }
-        let max_fragment_size =
-            mtu as isize - NAL_HEADER_SIZE as isize - H265FRAGMENTATION_UNIT_HEADER_SIZE as isize;
+        let max_fragment_size = mtu as isize
+            - H265NALU_HEADER_SIZE as isize
+            - H265FRAGMENTATION_UNIT_HEADER_SIZE as isize;
         let nalu_data = nalu;
         let mut nalu_data_index = 2;
         let nalu_data_length = nalu.len() as isize - nalu_data_index;
@@ -144,11 +154,15 @@ impl HevcPayloader {
             let current_fragment_size = std::cmp::min(max_fragment_size, nalu_data_remaining);
             //out: = make([]byte, fuaHeaderSize + currentFragmentSize)
             let mut out = BytesMut::with_capacity(
-                H265FRAGMENTATION_UNIT_HEADER_SIZE + current_fragment_size as usize,
+                H265NALU_HEADER_SIZE
+                    + H265FRAGMENTATION_UNIT_HEADER_SIZE
+                    + current_fragment_size as usize,
             );
-            out.extend_from_slice(&FRAG_PAYLOAD_HDR);
+            out.put_u16(
+                (payload_header.0 & 0x81ff) | ((H265NALU_FRAGMENTATION_UNIT_TYPE as u16) << 9),
+            );
             let is_first = nalu_data_index == 2;
-            let is_last = !is_first && current_fragment_size < max_fragment_size;
+            let is_last = nalu_data_remaining == current_fragment_size;
             /*
             +---------------+
             |0|1|2|3|4|5|6|7|
@@ -156,31 +170,7 @@ impl HevcPayloader {
             |S|E|  fu_type  |
             +---------------+
             */
-            if nalu_type == UnitType::IDR {
-                if is_first {
-                    out.put_u8(FU_HDR_IDR_S);
-                } else if is_last {
-                    out.put_u8(FU_HDR_IDR_E);
-                } else {
-                    out.put_u8(FU_HDR_IDR_M);
-                }
-            } else if nalu_type == UnitType::PFR {
-                if is_first {
-                    out.put_u8(FU_HDR_P_S);
-                } else if is_last {
-                    out.put_u8(FU_HDR_P_E);
-                } else {
-                    out.put_u8(FU_HDR_P_M);
-                }
-            } else if nalu_type == UnitType::BFR {
-                if is_first {
-                    out.put_u8(FU_HDR_B_S);
-                } else if is_last {
-                    out.put_u8(FU_HDR_B_E);
-                } else {
-                    out.put_u8(FU_HDR_B_M);
-                }
-            }
+            out.put_u8(((is_first as u8) << 7) | ((is_last as u8) << 6) | payload_nalu_type);
 
             out.extend_from_slice(
                 &nalu_data
@@ -205,6 +195,10 @@ impl Payloader for HevcPayloader {
         let mut payloads = vec![];
 
         let (nal_idxs, offset) = HevcPayloader::parse(payload);
+        if nal_idxs.is_empty() {
+            self.emit(payload, mtu, &mut payloads);
+            return Ok(payloads);
+        }
         let nal_len = nal_idxs.len();
         for (i, start) in nal_idxs.iter().enumerate() {
             let end = if (i + 1) < nal_len {
@@ -705,14 +699,14 @@ impl H265FragmentationUnitPacket {
         }
 
         let payload_header = H265NALUHeader::new(payload[0], payload[1]);
-        if payload_header.f() {
-            return Err(Error::ErrH265CorruptedPacket);
-        }
         if !payload_header.is_fragmentation_unit() {
             return Err(Error::ErrInvalidH265PacketType);
         }
 
         let fu_header = H265FragmentationUnitHeader(payload[2]);
+        if payload_header.f() && fu_header.fu_type() != 9 {
+            return Err(Error::ErrH265CorruptedPacket);
+        }
         let mut payload = payload.slice(3..);
 
         if fu_header.s() && self.might_need_donl {
@@ -976,6 +970,7 @@ impl Default for H265Payload {
 pub struct H265Packet {
     payload: H265Payload,
     might_need_donl: bool,
+    fua_buffer: Option<BytesMut>,
 }
 
 impl H265Packet {
@@ -994,6 +989,28 @@ impl H265Packet {
     pub fn payload(&self) -> &H265Payload {
         &self.payload
     }
+
+    fn append_annex_b_nal(out: &mut BytesMut, nal: &Bytes) {
+        out.put(&*ANNEXB_NALUSTART_CODE);
+        out.put(nal.as_ref());
+    }
+
+    fn payload_prefix(payload: &Bytes) -> String {
+        payload
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn is_apple_image_description_nal(nal: &[u8]) -> bool {
+        let nal = nal
+            .strip_prefix(&[0x00, 0x00, 0x00, 0x01])
+            .or_else(|| nal.strip_prefix(&[0x00, 0x00, 0x01]))
+            .unwrap_or(nal);
+        nal.starts_with(APPLE_IMAGE_DESCRIPTION_MAGIC)
+    }
 }
 
 impl Depacketizer for H265Packet {
@@ -1004,7 +1021,20 @@ impl Depacketizer for H265Packet {
         }
 
         let payload_header = H265NALUHeader::new(payload[0], payload[1]);
-        if payload_header.f() {
+        if Self::is_apple_image_description_nal(payload) {
+            if payload.starts_with(&ANNEXB_NALUSTART_CODE)
+                || payload.starts_with(&ANNEXB_3_NALUSTART_CODE)
+            {
+                return Ok(payload.clone());
+            }
+
+            let mut out = BytesMut::new();
+            out.put(&*ANNEXB_NALUSTART_CODE);
+            out.put(payload.as_ref());
+            return Ok(out.freeze());
+        }
+
+        if payload_header.f() && !payload_header.is_fragmentation_unit() {
             return Err(Error::ErrH265CorruptedPacket);
         }
 
@@ -1013,36 +1043,149 @@ impl Depacketizer for H265Packet {
             decoded.depacketize(payload)?;
 
             self.payload = H265Payload::H265PACIPacket(decoded);
+            return Ok(payload.clone());
         } else if payload_header.is_fragmentation_unit() {
             let mut decoded = H265FragmentationUnitPacket::default();
             decoded.with_donl(self.might_need_donl);
 
             decoded.depacketize(payload)?;
 
+            let fu_header = decoded.fu_header();
+            if fu_header.s() {
+                if !cfg!(test) && self.fua_buffer.as_ref().is_some_and(|buf| !buf.is_empty()) {
+                    println!(
+                        "umbrees h265_fu dropping stale buffered fragment before new start buffered_len={} new_fu_type={} payload_header={:04x}",
+                        self.fua_buffer.as_ref().map(|buf| buf.len()).unwrap_or(0),
+                        fu_header.fu_type(),
+                        payload_header.0,
+                    );
+                }
+                self.fua_buffer = Some(BytesMut::new());
+            } else if self.fua_buffer.is_none() {
+                if !cfg!(test) {
+                    println!(
+                        "umbrees h265_fu fragment without start s={} e={} fu_type={} payload_header={:04x} payload_len={} prefix={}",
+                        fu_header.s(),
+                        fu_header.e(),
+                        fu_header.fu_type(),
+                        payload_header.0,
+                        payload.len(),
+                        Self::payload_prefix(payload),
+                    );
+                }
+                self.fua_buffer = Some(BytesMut::new());
+            }
+
+            if let Some(fua_buffer) = &mut self.fua_buffer {
+                fua_buffer.put(&*decoded.payload());
+            }
+
+            if !cfg!(test) {
+                println!(
+                    "umbrees h265_fu part s={} e={} fu_type={} payload_header={:04x} frag_payload_len={} buffered_len={} prefix={}",
+                    fu_header.s(),
+                    fu_header.e(),
+                    fu_header.fu_type(),
+                    payload_header.0,
+                    decoded.payload().len(),
+                    self.fua_buffer.as_ref().map(|buf| buf.len()).unwrap_or(0),
+                    Self::payload_prefix(payload),
+                );
+            }
+
             self.payload = H265Payload::H265FragmentationUnitPacket(decoded);
+
+            if fu_header.e() {
+                let fragmented_type = fu_header.fu_type();
+                let nal_header =
+                    H265NALUHeader::new((payload[0] & 0x81) | (fragmented_type << 1), payload[1]);
+
+                let mut out = BytesMut::new();
+                out.put(&*ANNEXB_NALUSTART_CODE);
+                out.put_u16(nal_header.0);
+                if let Some(fua_buffer) = self.fua_buffer.take() {
+                    out.put(fua_buffer);
+                }
+
+                if nal_header.f() && !Self::is_apple_image_description_nal(&out) {
+                    return Err(Error::ErrH265CorruptedPacket);
+                }
+
+                if !cfg!(test) {
+                    println!(
+                        "umbrees h265_fu complete nal_header={:04x} nal_type={} annexb_len={} annexb_prefix={}",
+                        nal_header.0,
+                        nal_header.nalu_type(),
+                        out.len(),
+                        out.iter()
+                            .take(12)
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(""),
+                    );
+                }
+
+                return Ok(out.freeze());
+            }
+
+            return Ok(Bytes::new());
         } else if payload_header.is_aggregation_packet() {
             let mut decoded = H265AggregationPacket::default();
             decoded.with_donl(self.might_need_donl);
 
             decoded.depacketize(payload)?;
 
+            let mut out = BytesMut::new();
+            if let Some(first_unit) = decoded.first_unit() {
+                Self::append_annex_b_nal(&mut out, &first_unit.nal_unit());
+            }
+            for unit in decoded.other_units() {
+                Self::append_annex_b_nal(&mut out, &unit.nal_unit());
+            }
+
+            if !cfg!(test) {
+                println!(
+                    "umbrees h265_ap complete units={} annexb_len={} payload_header={:04x} prefix={}",
+                    1 + decoded.other_units().len(),
+                    out.len(),
+                    payload_header.0,
+                    Self::payload_prefix(payload),
+                );
+            }
+
             self.payload = H265Payload::H265AggregationPacket(decoded);
+            return Ok(out.freeze());
         } else {
             let mut decoded = H265SingleNALUnitPacket::default();
             decoded.with_donl(self.might_need_donl);
 
             decoded.depacketize(payload)?;
 
-            self.payload = H265Payload::H265SingleNALUnitPacket(decoded);
-        }
+            let mut out = BytesMut::new();
+            out.put(&*ANNEXB_NALUSTART_CODE);
+            out.put_u16(decoded.payload_header().0);
+            out.put(decoded.payload());
 
-        Ok(payload.clone())
+            self.payload = H265Payload::H265SingleNALUnitPacket(decoded);
+            return Ok(out.freeze());
+        }
     }
 
     /// is_partition_head checks if this is the head of a packetized nalu stream.
-    fn is_partition_head(&self, _payload: &Bytes) -> bool {
-        //TODO:
-        true
+    fn is_partition_head(&self, payload: &Bytes) -> bool {
+        if payload.len() < H265NALU_HEADER_SIZE {
+            return false;
+        }
+
+        let payload_header = H265NALUHeader::new(payload[0], payload[1]);
+        if payload_header.is_fragmentation_unit() {
+            if payload.len() < H265NALU_HEADER_SIZE + H265FRAGMENTATION_UNIT_HEADER_SIZE {
+                return false;
+            }
+            H265FragmentationUnitHeader(payload[2]).s()
+        } else {
+            true
+        }
     }
 
     fn is_partition_tail(&self, marker: bool, _payload: &Bytes) -> bool {
