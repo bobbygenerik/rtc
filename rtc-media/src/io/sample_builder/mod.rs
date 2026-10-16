@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod sample_builder_test;
 #[cfg(test)]
+mod immediate_release_test;
+#[cfg(test)]
 mod sample_sequence_location_test;
 
 pub mod sample_sequence_location;
@@ -44,6 +46,13 @@ pub struct SampleBuilder<T: Depacketizer> {
     /// number of padding packets detected and dropped. This number will be a subset of
     /// `dropped_packets`
     padding_packets: u16,
+
+    /// Release complete partitions even when the next packet's timestamp is unknown.
+    /// Opt-in for video consumers which schedule using RTP timestamps, not duration.
+    immediate_partition_release: bool,
+    /// Exclusive sequence boundary of the last sample released in immediate mode.
+    /// Prevent late retransmissions from reactivating an already consumed partition.
+    released_partition_end: Option<u16>,
 }
 
 impl<T: Depacketizer> SampleBuilder<T> {
@@ -66,12 +75,25 @@ impl<T: Depacketizer> SampleBuilder<T> {
             prepared: SampleSequenceLocation::new(),
             dropped_packets: 0,
             padding_packets: 0,
+            immediate_partition_release: false,
+            released_partition_end: None,
         }
     }
 
     pub fn with_max_time_delay(mut self, max_late_duration: Duration) -> Self {
         self.max_late_timestamp =
             (self.sample_rate as u128 * max_late_duration.as_millis() / 1000) as u32;
+        self
+    }
+
+    /// Release a contiguous, head-aligned partition as soon as its tail arrives.
+    ///
+    /// When there is no following packet, the returned sample has zero duration;
+    /// its RTP timestamp remains intact. Only use this for consumers which do not
+    /// require duration lookahead. Missing packets and unmarked partitions retain
+    /// the existing buffering rules. The default is unchanged for audio/other users.
+    pub fn with_immediate_partition_release(mut self) -> Self {
+        self.immediate_partition_release = true;
         self
     }
 
@@ -197,10 +219,22 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// this memory make sure to copy before calling push
     pub fn push(&mut self, p: Packet) {
         let sequence_number = p.header.sequence_number;
+        if self.immediate_partition_release && self.released_partition_end.is_some_and(|end| {
+            sequence_number.wrapping_sub(end) > u16::MAX / 2
+        }) {
+            // A completed sample can leave no future packet buffered. Keep its
+            // sequence boundary so stale retransmissions cannot refill that hole.
+            return;
+        }
         self.buffer[sequence_number as usize] = Some(p);
         match self.filled.compare(sequence_number) {
             Comparison::Void => {
-                self.filled.head = sequence_number;
+                if !self.immediate_partition_release || self.released_partition_end.is_none() {
+                    self.filled.head = sequence_number;
+                }
+                // After an immediate release, an empty range still records the
+                // next expected sequence. A later picture's tail may arrive
+                // first; retain its leading gap until repaired or purged.
                 self.filled.tail = sequence_number.wrapping_add(1);
             }
             Comparison::Before => {
@@ -234,6 +268,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
         }
 
         let mut consume = SampleSequenceLocation::new();
+        let mut reached_partition_tail = false;
 
         let mut i = self.active.head;
         // `self.active` isn't modified in the loop, fetch the timestamp once and cache it.
@@ -259,6 +294,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
             if is_partition_tail && is_same_timestamp.unwrap_or(true) {
                 consume.head = self.active.head;
                 consume.tail = i.wrapping_add(1);
+                reached_partition_tail = true;
                 break;
             }
 
@@ -274,7 +310,12 @@ impl<T: Depacketizer> SampleBuilder<T> {
             return Err(BuildError::NothingToConsume);
         }
 
-        if !purging_buffers && self.buffer[consume.tail as usize].is_none() {
+        let release_without_lookahead = self.immediate_partition_release && reached_partition_tail
+            && self.buffer[consume.head as usize].as_ref().is_some_and(|packet| {
+                self.depacketizer.is_partition_head(&packet.payload)
+            });
+        if !purging_buffers && self.buffer[consume.tail as usize].is_none()
+            && !release_without_lookahead {
             // wait for the next packet after this set of packets to arrive
             // to ensure at least one post sample timestamp is known
             // (unless we have to release right now)
@@ -353,12 +394,24 @@ impl<T: Depacketizer> SampleBuilder<T> {
         self.dropped_packets = 0;
         self.padding_packets = 0;
         self.last_sample_timestamp = Some(sample_timestamp);
+        if self.immediate_partition_release {
+            self.released_partition_end = Some(consume.tail);
+        }
 
         self.prepared_samples[self.prepared.tail as usize] = Some(sample);
         self.prepared.tail = self.prepared.tail.wrapping_add(1);
 
         self.purge_consumed_location(&consume, true);
         self.purge_consumed_buffers();
+        if self.immediate_partition_release {
+            // Without lookahead, active may be empty and compare() then returns
+            // Void. Release every consumed fragment rather than leaving a stale
+            // FU tail at the head of the next picture.
+            while self.filled.has_data() && self.filled.head != self.active.head {
+                self.release_packet(self.filled.head);
+                self.filled.head = self.filled.head.wrapping_add(1);
+            }
+        }
 
         Ok(consume)
     }
